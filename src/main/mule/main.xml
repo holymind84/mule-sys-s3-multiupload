@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+ 
+<mule xmlns:file="http://www.mulesoft.org/schema/mule/file" xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:s3="http://www.mulesoft.org/schema/mule/s3" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/s3 http://www.mulesoft.org/schema/mule/s3/current/mule-s3.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd">
+	<flow name="my-sys-s3-5-8Flow" doc:id="9862757c-0ef1-4a89-8088-b5501aaba268" >
+		<file:listener doc:name="On New or Updated File" doc:id="6f9d220f-18f2-4176-a01d-f2cac84c32aa" directory="${file.dir}" recursive="false" moveToDirectory="${file.backup}">
+			<non-repeatable-stream />
+			<scheduling-strategy >
+				<fixed-frequency frequency="5000"/>
+			</scheduling-strategy>
+		</file:listener>
+		<set-variable value="${chunk.100M}" doc:name="Init partsize" doc:id="55ee4a52-dce9-479e-b603-f4ff4f364e6e" variableName="partsize" />
+		<logger level="INFO" doc:name="Logger" doc:id="6135eb4b-6058-461c-b58d-3bcf6d8dd9da" message='#[output application/json&#10;---&#10;{&#10;	&#10;	message: "File received - " ++  (attributes.fileName default ""),&#10;	"note": "very important: set non repetable stream "&#10;}]'/>
+		<set-variable value="#[payload]" doc:name="file" doc:id="a3d2c72c-bec3-4e5e-8f8a-3d68c999d9ee" variableName="file" />
+		<set-variable value="#[attributes.size]" doc:name="size" doc:id="a775775d-9916-434e-98f6-09b8f38e9e01" variableName="size" />
+		<set-variable value="#[floor(vars.size / vars.partsize)]" doc:name="blocks" doc:id="3a80bfb1-3429-49ed-9a0b-99da83d61efb" variableName="blocks" />
+		<set-variable value='#[attributes.fileName]' doc:name="filename" doc:id="612cdb9b-3efb-47e8-a346-dc58ab1cd075" variableName="filename"/>
+		<set-variable value="#[[]]" doc:name="etags" doc:id="3aab3e9c-3e68-44df-a687-b6e5ac783f42" variableName="etags"/>
+		<s3:initiate-multipart-upload doc:name="Initiate multipart upload" doc:id="1b9a2557-0598-46f4-a2f8-e49efcd4aff5" config-ref="Amazon_S3_Configuration" bucketName="${aws.s3.bucket}" key="#[vars.filename]"/>
+		<set-variable value="#[payload]" doc:name="uploadid" doc:id="3493f204-21fd-48a2-b162-f89611979226" variableName="uploadid"/>
+		<logger level="INFO" doc:name="Logger" doc:id="eb4e77c5-cd80-4841-b66e-c3de828d419a" message='#[output application/json&#10;---&#10;{&#10;	&#10;	where: "after initiate",&#10;	body : payload&#10;}]'/>
+		<choice doc:name="Choice" doc:id="619076fc-b7e6-475b-9c03-6abce0aaaf88" >
+			<when expression="#[vars.size &gt; vars.partsize]">
+				<foreach doc:name="For Each" doc:id="afea7367-397a-4334-a3c0-7e4b7b83f260" collection="#[1 to vars.blocks]">
+			<s3:upload-part doc:name="Upload part" doc:id="9f0472e8-02d9-467a-b844-0360cbc21390" config-ref="Amazon_S3_Configuration" bucketName="${aws.s3.bucket}" key="#[vars.filename]" uploadId="#[vars.uploadid]" partSize="#[vars.partsize]" partNumber="#[vars.counter]">
+				<s3:content><![CDATA[#[vars.file]]]></s3:content>
+			</s3:upload-part>
+			<logger level="INFO" doc:name="Logger" doc:id="3422ffe5-d02c-46f3-acda-e305a51d2323" message='#[output application/json&#10;---&#10;{&#10;	&#10;	where: "upload part " ++ vars.counter ++ " of " ++ vars.blocks ++  " done",&#10;	attributes : payload&#10;}]' />
+			<set-variable value="#[%dw 2.0&#10;output application/json&#10;---&#10;&#10;vars.etags ++ [{&#10;	etag: payload.etag,&#10;	partNumber: payload.partNumber&#10;}]]" doc:name="update etags" doc:id="17d1128e-9d43-4e86-b13b-0000e075ae1a" variableName="etags" />
+		</foreach>
+				<s3:upload-part partSize="#[vars.size mod vars.partsize]" doc:name="Upload Last Part" doc:id="ea6aee24-0dac-49e1-8d05-3b7aa11ca040" config-ref="Amazon_S3_Configuration" bucketName="${aws.s3.bucket}" key="#[vars.filename]" uploadId="#[vars.uploadid]" partNumber="#[vars.blocks + 1]" isLastPart="true">
+				<s3:content><![CDATA[#[vars.file]]]></s3:content>
+			</s3:upload-part>
+				<logger level="INFO" doc:name="Log Last Upload" doc:id="0139d045-f293-4768-a66d-ca2a27ca2681" message='#[output application/json&#10;---&#10;{&#10;	&#10;	where: "Last upload done",&#10;	attributes : payload&#10;}]' />
+			</when>
+			<otherwise>
+				<s3:upload-part partSize="#[vars.size]" doc:name="Upload Last Part" doc:id="9942c75f-05fb-4039-88dc-cc96e0ca69d7" config-ref="Amazon_S3_Configuration" bucketName="${aws.s3.bucket}" key="#[vars.filename]" uploadId="#[vars.uploadid]" partNumber="#[1]" isLastPart="true">
+			<s3:content><![CDATA[#[vars.file]]]></s3:content>
+		</s3:upload-part>
+				<logger level="INFO" doc:name="Log Last Upload1" doc:id="b4fa8b37-5989-4def-9062-ffa48a82caf9" message='#[output application/json&#10;---&#10;{&#10;	&#10;	where: "The one and only upload done",&#10;	attributes : payload&#10;}]' />
+			</otherwise>
+		</choice>
+		<set-variable value="#[%dw 2.0&#10;output application/json&#10;---&#10;&#10;vars.etags ++ [{&#10;	etag: payload.etag,&#10;	partNumber: payload.partNumber&#10;}]]" doc:name="update last etags" doc:id="5d6e9fdf-a532-42a5-86cf-398aabb668e4" variableName="etags" />
+		<s3:complete-multipart-upload doc:name="Complete multipart upload" doc:id="93571893-58db-4987-a41d-6f4ca21ad2da" config-ref="Amazon_S3_Configuration" bucketName="${aws.s3.bucket}" key="#[vars.filename]" uploadId="#[vars.uploadid]">
+			<s3:part-e-tags ><![CDATA[#[vars.etags]]]></s3:part-e-tags>
+		</s3:complete-multipart-upload>
+		<logger level="INFO" doc:name="Final Log" doc:id="5aff1e53-07f1-4618-b1ce-fb812555c229" message='#[%dw 2.0&#10;output application/json&#10;---&#10;{&#10;	"message" : "OK",&#10;	"payload": payload&#10;}]' />
+	</flow>
+	
+</mule>
